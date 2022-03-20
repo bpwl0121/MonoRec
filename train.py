@@ -11,6 +11,7 @@ from trainer.trainer import Trainer
 
 
 def main(config, options=[]):
+    # set random seed
     seed_rng(0)
     logger = config.get_logger('train')
 
@@ -50,6 +51,8 @@ def main(config, options=[]):
 
 
 if __name__ == '__main__':
+    # Depth Bootstrap
+    # python train.py --config configs/train/monorec/monorec_depth.json --options stereo
     args = argparse.ArgumentParser(description='PyTorch Template')
     args.add_argument('-c', '--config', default=None, type=str,
                       help='config file path (default: None)')

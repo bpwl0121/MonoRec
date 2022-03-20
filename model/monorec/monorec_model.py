@@ -55,6 +55,7 @@ class DepthAugmentation(nn.Module):
             data_dict["result"] = conditional_flip(data_dict["result"], self._flip_conditions, inplace=False)
 
 
+# only in monorec_mask, augmentation is MaskAugmentation. 
 class MaskAugmentation(nn.Module):
     def __init__(self):
         super().__init__()
@@ -89,6 +90,7 @@ class MaskAugmentation(nn.Module):
             data_dict["target"] = data_dict["mvobj_mask"]
 
     def revert(self, data_dict):
+        # TODO mask loss do not use reprojection loss, so we do not need to revert data
         return data_dict
 
 
@@ -130,6 +132,7 @@ class ResnetEncoder(nn.Module):
 
 
 class CostVolumeModule(nn.Module):
+    # use_mono = True, use_stereo = False, use_ssim=True, sfcv_mult_mask=True, cv_patch_size=3
     def __init__(self, use_mono=True, use_stereo=False, use_ssim=True, patch_size=3, channel_weights=(5 / 32, 16 / 32, 11 / 32), alpha=10, not_center_cv=False, sfcv_mult_mask=True):
         super().__init__()
         self.use_mono = use_mono
@@ -157,6 +160,7 @@ class CostVolumeModule(nn.Module):
         intrinsics = []
         poses = []
 
+        # only one of use_mono or use_stereo is True, the other is False
         if self.use_mono:
             frames += data_dict["frames"]
             intrinsics += data_dict["intrinsics"]
@@ -168,6 +172,7 @@ class CostVolumeModule(nn.Module):
 
         batch_size, channels, height, width = keyframe.shape
 
+        # extrinsics, from first frame to current frame 
         extrinsics = [torch.inverse(pose) for pose in poses]
 
         # If the convolution kernel for the SAD tensor has not been defined in init, do it now.
@@ -181,6 +186,7 @@ class CostVolumeModule(nn.Module):
         if "cv_depths" in data_dict:
             depths = data_dict["cv_depths"]
         else:
+            # depths.shape [batch_size, cv_depth_steps, height, width]
             depths = (1 / torch.linspace(data_dict["inv_depth_max"][0].item(), data_dict["inv_depth_min"][0].item(), data_dict["cv_depth_steps"][0].item(),
                                     device=keyframe.device)).view(1, -1, 1, 1).expand(batch_size, -1, height, width)
 
@@ -195,35 +201,44 @@ class CostVolumeModule(nn.Module):
 
             depth_value_count = batch_depths.shape[0]
 
+            # from image coordinate to camera coordinate, see forward function of Backprojection, almost same
             inv_k = torch.inverse(keyframe_intrinsics[batch_nr]).unsqueeze(0)
             cam_points = (inv_k[:, :3, :3] @ backproject_depth.coord)
             cam_points = batch_depths.view(depth_value_count, 1, -1) * cam_points
             cam_points = torch.cat([cam_points, backproject_depth.ones.expand(depth_value_count, -1, -1)], 1)
+            # cam_points.shape torch.Size([32, 4, 131072]) 
+            # 32 for depth steps, 
+            # 4 for homogeneous coordinate(last dimension all 1) 
+            # 131072 for 256*512 height*width
 
             warped_images = []
             warped_masks = []
 
             for i, image in enumerate(frames):
+                # from first frame to current frame @ from keyframe to first frame => from keyframe to current frame
                 t = extrinsics[i][batch_nr] @ keyframe_pose[batch_nr]
                 pix_coords = point_projection(cam_points, depth_value_count, height, width, intrinsics[i][batch_nr].unsqueeze(0), t.unsqueeze(0)).clamp(-2, 2)
 
-                # (D, C, H, W)
+                # (D, C, H, W), D for depth_value_count = 32
                 image_to_warp = image[batch_nr, :, :, :].unsqueeze(0).expand(depth_value_count, -1, -1, -1)
                 mask_to_warp = self.create_mask(1, height, width, self.border_radius, keyframe.device).expand(
                     depth_value_count, -1, -1, -1)
 
+                # warped keyframe in current frame
                 warped_image = F.grid_sample(image_to_warp, pix_coords)
                 warped_images.append(warped_image)
 
                 warped_mask = F.grid_sample(mask_to_warp, pix_coords)
+                # only all depth in warped_mask available and mask_to_warp not 0 has the warped_mask value of 1
                 warped_mask = mask_to_warp[0] * torch.min(warped_mask != 0, dim=0)[0]
                 warped_masks.append(warped_mask)
 
-            # (D, F, C, H, W)
+            # (D, F, C, H, W) D depth, F frams, C channel 3
             warped_images = torch.stack(warped_images, dim=1)
             # (F, 1, H, W)
             warped_masks = torch.stack(warped_masks)
 
+            # use_ssim=True
             if not self.use_ssim:
                 difference = torch.abs(warped_images - keyframe[batch_nr])
             elif self.use_ssim == True:
@@ -244,9 +259,11 @@ class CostVolumeModule(nn.Module):
 
             # (F, C, D, H, W)
             difference = difference.permute(1, 2, 0, 3, 4)
+            # TODO https://github.com/lmb-freiburg/deeptam/blob/master/mapping/python/deeptam_mapper/models/helpers.py
             sad_volume = F.conv3d(difference, self.sad_kernel, padding=(0, self.patch_size // 2,
                                                                         self.patch_size // 2)).squeeze(1)
             # (F, D, H, W)
+            # sfcv_mult_mask=True
             if self.sfcv_mult_mask:
                 single_frame_cv = (1 - sad_volume * 2) * warped_masks
             else:
@@ -264,12 +281,14 @@ class CostVolumeModule(nn.Module):
             weight_sum = torch.sum(weight, dim=0).squeeze()
             weight_zero = weight_sum == 0
             cost_volume[:, torch.logical_not(weight_zero)] /= weight_sum[torch.logical_not(weight_zero)]
+            # not_center_cv=False
             if not self.not_center_cv:
                 cost_volume = 1 - 2 * cost_volume
             cost_volume[:, weight_zero] = 0
 
             cost_volumes.append(cost_volume)
 
+################## data from CostVolumeModule ########################
         data_dict["cost_volume"] = torch.stack(cost_volumes)
         data_dict["single_frame_cvs"] = [torch.stack(sf_cv) for sf_cv in single_frame_cvs]
 
@@ -278,6 +297,7 @@ class CostVolumeModule(nn.Module):
         data_dict["cv_module_time"] = keyframe.new_tensor([time_diff])
 
         return data_dict
+##################### data from CostVolumeModule ########################
 
     def create_mask(self, c: int, height: int, width: int, border_radius: int, device=None):
         mask = torch.ones(c, 1, height - 2 * border_radius, width - 2 * border_radius, device=device)
@@ -285,6 +305,7 @@ class CostVolumeModule(nn.Module):
 
 
 class MaskModule(nn.Module):
+    # depth_steps=32, feature_channels=(64, 64, 128, 256, 512), use_cv=True, use_features=True
     def __init__(self, depth_steps=32, feature_channels=(64, 64, 128, 256, 512), use_cv=True, use_features=True):
         super().__init__()
         self.depth_steps = depth_steps
@@ -343,17 +364,23 @@ class MaskModule(nn.Module):
         )
 
     def forward(self, data_dict):
+        # use single_frame_cvs and image_features as input
         single_frame_cvs = data_dict["single_frame_cvs"]
         keyframe = data_dict["keyframe"]
         image_features = data_dict["image_features"]
 
         cv_feats = []
 
+        # use_cv=True
         if not self.use_cv:
             single_frame_cvs = [sfcv * 0 for sfcv in single_frame_cvs]
+        # use_features=True
         if not self.use_features:
             image_features = [feats * 0 for feats in image_features]
 
+        # from the paper
+        # The features from different cost volumes are aggregated using max-pooling and then passed through the decoder. 
+        # In this way, MaskModule can be applied to different numbers of frames without retraining
         for cv in single_frame_cvs:
             # x = torch.cat([cv, keyframe], dim=1)
             x = cv
@@ -362,12 +389,14 @@ class MaskModule(nn.Module):
                 if len(cv_feats) == i:
                     cv_feats.append(x)
                 else:
+                    # max-pooling
                     cv_feats[i] = torch.max(cv_feats[i], x)
 
         cv_feats = [F.dropout(cv_f, training=self.training) for cv_f in cv_feats]
         x = cv_feats[-1]
 
         for i, layer in enumerate(self.dec):
+            # image_features from pretrained and freezed resnet18, see the paper
             if i == 0:
                 x = torch.cat([cv_feats[-1], image_features[3]], dim=1)
                 x = layer[0](x)
@@ -385,6 +414,7 @@ class MaskModule(nn.Module):
         return data_dict
 
 
+# not in use
 class SimpleMaskModule(nn.Module):
     def __init__(self, depth_steps=32, feature_channels=(64, 64, 128, 256, 512)):
         super().__init__()
@@ -474,11 +504,12 @@ class SimpleMaskModule(nn.Module):
 
 
 class DepthModule(nn.Module):
-    def __init__(self, depth_steps=32, feature_channels=(64, 64, 128, 256, 512), large_model=False) -> None:
+    def __init__(self, depth_steps=32, feature_channels=(64, 64, 128, 256, 512), large_model=False):
         super().__init__()
         self.depth_steps = depth_steps
         self.feat_chns = feature_channels
         self._in_channels = self.depth_steps + 3
+        # large_model=False
         self._cv_enc_feat_chns = (48, 64, 128, 192, 256) if not large_model else (48, 64, 128, 256, 512)
         self._dec_feat_chns = (256, 128, 64, 48, 32, 24) if not large_model else (512, 256, 128, 64, 32, 24)
 
@@ -518,12 +549,15 @@ class DepthModule(nn.Module):
             )
         ])
 
+        # self._dec_feat_chns = (256, 128, 64, 48, 32, 24)
+        # depth predictors for features from different layers
         self.predictors = nn.ModuleList([nn.Sequential(
             PadSameConv2d(kernel_size=3),
             nn.Conv2d(in_channels=channels, out_channels=1, kernel_size=3))
             for channels in self._dec_feat_chns[:3] + self._dec_feat_chns[-1:]])
 
     def forward(self, data_dict):
+        # use keyframe, weighted complete cost_volume and image_features as input
         keyframe = data_dict["keyframe"]
         cost_volume = data_dict["cost_volume"]
         image_features = data_dict["image_features"]
@@ -614,12 +648,21 @@ class MonoRecModel(nn.Module):
         self.freeze_resnet = freeze_resnet
 
         self._feature_extractor = ResnetEncoder(num_layers=18, pretrained=True)
+        # self.freeze_resnet always True
         if self.freeze_resnet:
             for p in self._feature_extractor.parameters(True):
                 p.requires_grad_(False)
 
+        # always initialization: use_mono = True, use_stereo = False, use_ssim=True, sfcv_mult_mask=True, cv_patch_size=3
         self.cv_module = CostVolumeModule(use_mono=use_mono, use_stereo=use_stereo, use_ssim=use_ssim, sfcv_mult_mask=self.sfcv_mult_mask, patch_size=cv_patch_size)
+        
+        # monorec_depth "pretrain_mode": 1
+        # monorec_mask "pretrain_mode": 2
+        # monorec_mask_ref "pretrain_mode": 0
+        # monorec_depth_ref "pretrain_mode": 0
+        
         if not (self.pretrain_mode == 1 or self.pretrain_mode == 3):
+            # simple_mask=False
             if not self.simple_mask:
                 self.att_module = MaskModule(self.cv_depth_steps, self._feature_extractor.num_ch_enc, use_cv=mask_use_cv, use_features=mask_use_feats)
             else:
@@ -627,6 +670,8 @@ class MonoRecModel(nn.Module):
         if not self.pretrain_mode == 2:
             self.depth_module = DepthModule(self.cv_depth_steps, feature_channels=self._feature_extractor.num_ch_enc, large_model=self.depth_large_model)
 
+        # self.checkpoint_location is [] for depth, otherwise None, so this part is useless for training
+        # only for loading trained final model
         if self.checkpoint_location is not None:
             if not isinstance(checkpoint_location, list):
                 checkpoint_location = [checkpoint_location]
@@ -636,6 +681,7 @@ class MonoRecModel(nn.Module):
                 checkpoint_state_dict = filter_state_dict(checkpoint_state_dict, checkpoint["arch"] == "DataParallel")
                 self.load_state_dict(checkpoint_state_dict, strict=False)
 
+        # for monorec_mask_ref and monorec_depth_ref
         if self.mask_cp_loc is not None:
             if not isinstance(mask_cp_loc, list):
                 mask_cp_loc = [mask_cp_loc]
@@ -643,9 +689,12 @@ class MonoRecModel(nn.Module):
                 checkpoint = torch.load(cp, map_location=torch.device("cpu"))
                 checkpoint_state_dict = checkpoint["state_dict"]
                 checkpoint_state_dict = filter_state_dict(checkpoint_state_dict, checkpoint["arch"] == "DataParallel")
+                # if k.startswith("att_module") ->'att_module.enc.0.0.conv.weight', 'att_module.enc.0.0.conv.bias', 'att_module.enc.0.1.conv.weight', ............
+                # k[11:] 'att_module.enc.0.0.conv.weight'->'enc.0.0.conv.weight'
                 checkpoint_state_dict = {k[11:]: checkpoint_state_dict[k] for k in checkpoint_state_dict if k.startswith("att_module")}
                 self.att_module.load_state_dict(checkpoint_state_dict, strict=False)
 
+        # for monorec_depth_ref and monorec_mask_ref
         if self.depth_cp_loc is not None:
             if not isinstance(depth_cp_loc, list):
                 depth_cp_loc = [depth_cp_loc]
@@ -656,12 +705,15 @@ class MonoRecModel(nn.Module):
                 checkpoint_state_dict = {k[13:]: checkpoint_state_dict[k] for k in checkpoint_state_dict if k.startswith("depth_module")}
                 self.depth_module.load_state_dict(checkpoint_state_dict, strict=False)
 
+        # only monorec_depth_ref, "att" in self.freeze_module
         for module_name in self.freeze_module:
             module = self.__getattr__(module_name + "_module")
             module.eval()
             for param in module.parameters(True):
                 param.requires_grad_(False)
 
+        # only in monorec_mask, augmentation is mask. 
+        # otherwise depth
         if self.augmentation == "depth":
             self.augmenter = DepthAugmentation()
         elif self.augmentation == "mask":
@@ -669,14 +721,19 @@ class MonoRecModel(nn.Module):
         else:
             self.augmenter = None
 
+    ############################ only used by monorec_depth #################
     def forward(self, data_dict):
         keyframe = data_dict["keyframe"]
 
+        # inv_depth_min_max=(0.33, 0.0025)
+        # https://pytorch.org/docs/stable/generated/torch.Tensor.new_tensor.html
         data_dict["inv_depth_min"] = keyframe.new_tensor([self.inv_depth_min_max[0]])
         data_dict["inv_depth_max"] = keyframe.new_tensor([self.inv_depth_min_max[1]])
+        # cv_depth_steps=32
         data_dict["cv_depth_steps"] = keyframe.new_tensor([self.cv_depth_steps], dtype=torch.int32)
 
         with torch.no_grad():
+            # no_cv False
             if not self.no_cv:
                 data_dict = self.cv_module(data_dict)
             else:
@@ -688,13 +745,25 @@ class MonoRecModel(nn.Module):
         if self.augmenter is not None and self.training:
             self.augmenter(data_dict)
 
+        # image_features from pretrained freezed resnet18
+        #################### data_dict["image_features"] from keyframe, not from augmented data_dict, a bug ############
         data_dict["image_features"] = self._feature_extractor(keyframe + .5)
 
+        # monorec_depth "pretrain_mode": 1
+        # monorec_mask "pretrain_mode": 2
+        # monorec_mask_ref "pretrain_mode": 0
+        # monorec_depth_ref "pretrain_mode": 0
+
+        # monorec_mask, monorec_mask_ref, monorec_depth_ref
         if self.pretrain_mode == 0 or self.pretrain_mode == 2:
+            # att_module is MaskModule
             data_dict = self.att_module(data_dict)
+        # monorec_depth
         elif self.pretrain_mode == 1:
             b, c, h, w = keyframe.shape
             if self.training:
+                # always pretrain_dropout_mode=0
+                # always pretrain_dropout=0
                 if self.pretrain_dropout_mode == 0:
                     cv_mask = keyframe.new_ones(b, 1, h // 8, w // 8, requires_grad=False)
                     F.dropout(cv_mask, p=1 - self.pretrain_dropout, training=self.training, inplace=True)
@@ -706,12 +775,17 @@ class MonoRecModel(nn.Module):
             else:
                 cv_mask = keyframe.new_zeros(b, 1, h, w, requires_grad=False)
             data_dict["cv_mask"] = cv_mask
+        # not in use
         elif self.pretrain_mode == 3:
             data_dict["cv_mask"] = data_dict["mvobj_mask"].clone().detach()
 
+        # monorec_depth, monorec_mask_ref, monorec_depth_ref
+        # for monorec_depth, data_dict["cv_mask"] always 0, since pretrain_dropout_mode=0 and pretrain_dropout=0 from the code above
+        # for monorec_mask_ref, monorec_depth_ref, data_dict["cv_mask"] from mask module
         if not self.pretrain_mode == 2:
             data_dict["cost_volume"] = (1 - data_dict["cv_mask"]) * data_dict["cost_volume"]
 
+            # input for depth_module are masked cost_volume and keyframe
             data_dict = self.depth_module(data_dict)
 
             data_dict["predicted_inverse_depths"] = [(1-pred) * self.inv_depth_min_max[1] + pred * self.inv_depth_min_max[0]
@@ -720,10 +794,13 @@ class MonoRecModel(nn.Module):
         if self.augmenter is not None and self.training:
             self.augmenter.revert(data_dict)
 
+        # monorec_mask
         if self.pretrain_mode == 2:
             data_dict["result"] = data_dict["cv_mask"]
+        # monorec_depth, monorec_mask_ref, monorec_depth_ref
         else:
             data_dict["result"] = data_dict["predicted_inverse_depths"][0]
             data_dict["mask"] = data_dict["cv_mask"]
 
         return data_dict
+        ############################ only used by monorec_depth #################

@@ -9,6 +9,7 @@ from trainer.trainer import Trainer
 from utils import map_fn, operator_on_dict
 
 
+# inherit from Trainer
 class MonoRecTrainer(Trainer):
     def __init__(self, model, loss, metrics, optimizer, config, data_loader, valid_data_loader=None, lr_scheduler=None, options=()):
         super().__init__(model, loss, metrics, optimizer, config, data_loader, valid_data_loader, lr_scheduler, options)
@@ -40,11 +41,17 @@ class MonoRecTrainer(Trainer):
         model.cv_module.use_mono = False
         model.cv_module.use_stereo = True
 
+        # monorec_mask "compute_stereo_pred": false
+        # monorec_mask_ref "compute_stereo_pred": true
+        # monorec_depth_ref "compute_stereo_pred": true
+
+        # use stereo setup to calculate the "cost_volume" and "single_frame_cvs", feed the depth_module the stereo data
         if self.compute_stereo_pred:
             # Compute stereo CV
             with torch.no_grad():
                 orig_data_dict = model.cv_module(orig_data_dict)
 
+            # get augmented cost_volume from non augmented orig_data_dict
             if model.augmenter is not None and model.training:
                 data_dict["cost_volume"] = model.augmenter.single_apply(orig_data_dict["cost_volume"])
                 data_dict["single_frame_cvs"] = [model.augmenter.single_apply(sfcv) for sfcv in orig_data_dict["single_frame_cvs"]]
@@ -53,6 +60,7 @@ class MonoRecTrainer(Trainer):
                 data_dict["single_frame_cvs"] = orig_data_dict["single_frame_cvs"]
 
             # Compute stereo depth
+            # concat_mono_stereo always False
             if not self.concat_mono_stereo:
                 with torch.no_grad():
                     data_dict = model.depth_module(data_dict)
@@ -68,6 +76,7 @@ class MonoRecTrainer(Trainer):
         model.cv_module.use_stereo = False
 
         # Compute mono CV
+        # get augmented cost_volume from non augmented orig_data_dict
         with torch.no_grad():
             orig_data_dict = model.cv_module(orig_data_dict)
         if model.augmenter is not None and model.training:
@@ -77,13 +86,20 @@ class MonoRecTrainer(Trainer):
             data_dict["cost_volume"] = orig_data_dict["cost_volume"]
             data_dict["single_frame_cvs"] = orig_data_dict["single_frame_cvs"]
 
-        # Compute mask
+        # compute_mask True, always predict mask
         if self.compute_mask:
             data_dict = model.att_module(data_dict)
+            # monorec_mask mult_mask_on_cv: False
+            # monorec_mask_ref mult_mask_on_cv: False
+            # monorec_depth_ref mult_mask_on_cv: True 
             if self.mult_mask_on_cv:
                 data_dict["cost_volume"] *= (1 - data_dict["cv_mask"])
         else:
             data_dict["cv_mask"] = data_dict["cost_volume"].new_zeros(data_dict["cost_volume"][:, :1, :, :].shape, requires_grad=False)
+        
+        # monorec_mask "compute_mono_pred": False
+        # monorec_mask_ref "compute_mono_pred": True
+        # monorec_depth_ref "compute_mono_pred": True
         if self.compute_mono_pred:
             # Compute mono depth
             data_dict = model.depth_module(data_dict)
@@ -92,14 +108,21 @@ class MonoRecTrainer(Trainer):
             mono_pred = [data_dict["cost_volume"].new_zeros(data_dict["cost_volume"][:, :1, :, :].shape, requires_grad=False)]
 
         # Prepare dict
+        # monorec_mask: data_dict["mask"]
+        # monorec_mask_ref: data_dict["mask"], data_dict["stereo_pred"], data_dict["mono_pred"]    
+        # monorec_depth_ref: mult_mask_on_cv is True, data_dict["cost_volume"] *= (1 - data_dict["cv_mask"]), but the modified cv is only used by depth module
+        # monorec_depth_ref: data_dict["mask"],data_dict["stereo_pred"], data_dict["mono_pred"]
+        
         data_dict["mono_pred"] = mono_pred
         data_dict["stereo_pred"] = stereo_pred
         data_dict["predicted_inverse_depths"] = mono_pred
         data_dict["result"] = mono_pred[0]
         data_dict["mask"] = data_dict["cv_mask"]
 
+        # TODO
         if model.augmenter is not None and model.training: model.augmenter.revert(data_dict)
 
+        # concat_mono_stereo always False
         if self.concat_mono_stereo:
             data_dict["keyframe"] = torch.cat(2 * [data_dict["keyframe"]], dim=0)
             data_dict["keyframe_pose"] = torch.cat(2 * [data_dict["keyframe_pose"]], dim=0)
@@ -131,6 +154,7 @@ class MonoRecTrainer(Trainer):
 
         for batch_idx, (data, target) in enumerate(self.data_loader):
             data, target = to(data, self.device), to(target, self.device)
+            # TODO target
             data["target"] = target
             data["optimizer"] = self.optimizer
 

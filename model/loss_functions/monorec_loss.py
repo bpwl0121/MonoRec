@@ -5,7 +5,7 @@ from utils import mask_mean
 from .common_losses import compute_errors, sparse_depth_loss, edge_aware_smoothness_loss, reprojection_loss, \
     selfsup_loss
 
-
+# loss for monorec_depth
 def depth_loss(data_dict, alpha=None, roi=None, options=()):
     loss_dict = {}
 
@@ -16,6 +16,8 @@ def depth_loss(data_dict, alpha=None, roi=None, options=()):
     mask_border = 0
     error_function = compute_errors
 
+    # "stereo" in options for monorec_depth
+    # use_stereo, use stereo frame as well
     if "stereo" in options:
         use_stereo = True
 
@@ -36,6 +38,7 @@ def depth_loss(data_dict, alpha=None, roi=None, options=()):
         if depth_prediction.shape[2] != depth_gt.shape[2]:
             depth_prediction = torch.nn.functional.upsample(depth_prediction, (depth_gt.shape[2], depth_gt.shape[3]))
         sdl = sparse_depth_loss(depth_prediction, depth_gt, l2=False)
+        # use_mono=True, use_stereo=True, automasking = True, error_function = compute_errors, combine_frames = "min", mask_border = 0
         md2l = selfsup_loss(depth_prediction, data_dict, scale=i, use_mono=use_mono, use_stereo=use_stereo, automasking=automasking, error_function=error_function, combine_frames=combine_frames, mask_border=mask_border)
         sdl_sum += sdl
         md2l_sum += md2l
@@ -47,6 +50,9 @@ def depth_loss(data_dict, alpha=None, roi=None, options=()):
     return loss_dict
 
 
+# loss for monorec_mask and monorec_mask_ref
+# "stereo" in options for monorec_mask
+# options is not used by mask_loss
 def mask_loss(data_dict, alpha=None, roi=None, options=()):
     gt_mask: torch.Tensor = data_dict["mvobj_mask"]
     cv_mask = data_dict["cv_mask"]
@@ -63,6 +69,8 @@ def mask_loss(data_dict, alpha=None, roi=None, options=()):
     # weight[gt_mask != 0] = (1 - mvg_ratio)
     # weight[gt_mask == 0] = mvg_ratio
 
+    # for monorec_mask, no multiplicative_weight_mask
+    # for monorec_mask_ref, multiplicative_weight_mask
     if "multiplicative_weight_mask" in data_dict:
         weight *= data_dict["multiplicative_weight_mask"]
 
@@ -161,10 +169,12 @@ def mask_refinement_loss(data_dict, alpha=None, roi=None, options=()):
         mono_sdl_sum += mask_mean(mono_sdl.detach(), mono_sdl_mask)
         stereo_sdl_sum += mask_mean(stereo_sdl.detach(), stereo_sdl_mask)
 
+        # use mono sparse_depth_loss for non moving object and stereo sparse_depth_loss for moving object
         sdl = mask_mean(mono_sdl * (1 - cv_mask), mono_sdl_mask) + mask_mean(stereo_sdl * cv_mask, stereo_sdl_mask) / bias
         sdl_sum += sdl
         loss_dict[f"sdl_{scale}"] = sdl
 
+        ################# dist_diff_loss not in the options of the pipeline ################
         if "dist_diff_loss" in options:
             b = 16 // (2 ** scale)
             mono_thresh = (mono_pred.detach() < (inv_depth_range / 32 * 2 + inv_depth_max))
@@ -177,6 +187,7 @@ def mask_refinement_loss(data_dict, alpha=None, roi=None, options=()):
             mult_weight_mask = mono_thresh.new_ones(mono_thresh.shape, dtype=torch.float32)
             mult_weight_mask[mono_thresh & ~gt_mask] = 1e-3
             data_dict["multiplicative_weight_mask"] = mult_weight_mask
+        ################# dist_diff_loss not in the options of the pipeline ################
 
         mono_smoothness = edge_aware_smoothness_loss(mono_pred, data_dict, reduce=False)
         stereo_smoothness = edge_aware_smoothness_loss(stereo_pred, data_dict, reduce=False)
@@ -184,9 +195,11 @@ def mask_refinement_loss(data_dict, alpha=None, roi=None, options=()):
 
         mono_repr_l = reprojection_loss(mono_pred, data_dict, use_mono=True, use_stereo=False,
                                         automasking=False, error_function=compute_errors, reduce=False, combine_frames="min", mono_auto=False).unsqueeze(1)
+        # TODO border=3
         stereo_repr_l = reprojection_loss(stereo_pred, data_dict, use_mono=False, use_stereo=True,
                                           automasking=False, error_function=compute_errors, reduce=False, combine_frames="min", mono_auto=False, border=3).unsqueeze(1)
 
+        # TODO
         mono_mask = torch.isinf(mono_repr_l)
         stereo_mask = torch.isinf(stereo_repr_l)
         mono_repr_l[mono_mask] = 0
@@ -283,8 +296,11 @@ def depth_aux_mask_loss(data_dict, alpha=None, roi=None, options=()):
 def depth_refinement_loss(data_dict, alpha=None, roi=None, options=()):
     loss_dict = {}
 
+    # use_stereo True
     use_stereo = "stereo" in options
+    # use_stereo_reprl True
     use_stereo_reprl = "stereo_repr" in options
+    # use_mono_stereodl True
     use_mono_stereodl = not ("no_mono_stereodl" in options)
 
     depth_gt = data_dict["target"]
@@ -326,16 +342,19 @@ def depth_refinement_loss(data_dict, alpha=None, roi=None, options=()):
             if use_mono_stereodl:
                 stereo_pred = torch.nn.functional.upsample(stereo_pred, (depth_gt.shape[2], depth_gt.shape[3]))
 
+        # use stereo_pred as gt, so stereo_pred.detach()
         if use_mono_stereodl:
             stereo_pred = stereo_pred.detach()
 
         # Depth losses
         mono_sparsedl, mono_sparsedl_mask = sparse_depth_loss(mono_pred, depth_gt * (1 - cv_mask_discrete), l2=False, reduce=False)
+        # TODO I think it is a bug for mono_sparsedl.detach(), we should not .detach()
         mono_sdl = mask_mean(mono_sparsedl.detach(), mono_sparsedl_mask)
         mono_sdl_sum += mono_sdl.detach()
 
         if use_mono_stereodl:
             mono_stereodl, mono_stereodl_mask = sparse_depth_loss(mono_pred, stereo_pred * cv_mask_discrete, l2=False, reduce=False)
+            # TODO I think it is a bug for mono_stereodl.detach(), we should not .detach()
             stereo_sdl = mask_mean(mono_stereodl.detach(), mono_stereodl_mask)
             stereo_sdl_sum += stereo_sdl.detach()
         else:
@@ -373,6 +392,7 @@ def depth_refinement_loss(data_dict, alpha=None, roi=None, options=()):
         loss_dict[f"md2l_{scale}"] = md2l
         md2l_sum += md2l
 
+    # mask_loss_value is 0
     loss += 2 * alpha * 4 * sdl_sum + 2 * (1 - alpha) * md2l_sum + mask_loss_value
     loss_dict["loss"] = loss
 

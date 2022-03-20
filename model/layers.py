@@ -54,20 +54,29 @@ class Backprojection(nn.Module):
         self.coord = nn.Parameter(torch.cat([self.coord, self.ones], 1), requires_grad=False)
 
     def forward(self, depth, inv_K) :
+        # the Z in cam_p_norm is 1, up to scale(depth)
         cam_p_norm = torch.matmul(inv_K[:, :3, :3], self.coord[:depth.shape[0], :, :])
+        # cam_p_norm*depth
         cam_p_euc = depth.view(depth.shape[0], 1, -1) * cam_p_norm
+        # homogeneous coordinate
         cam_p_h = torch.cat([cam_p_euc, self.ones[:depth.shape[0], :, :]], 1)
 
         return cam_p_h
 
 def point_projection(points3D, batch_size, height, width, K, T):
     N, H, W = batch_size, height, width
+    # convert every position of pixel from keyframe in current frame, depth in 32 steps, [R,T] points3D[32,4,H*W]
     cam_coord = torch.matmul(torch.matmul(K, T)[:, :3, :], points3D)
+    # get img coordinate by dividing the depth scale
     img_coord = cam_coord[:, :2, :] / (cam_coord[:, 2:3, :] + 1e-7)
+    # normalize the img coordinate, range from 0 to 1
     img_coord[:, 0, :] /= W - 1
     img_coord[:, 1, :] /= H - 1
+    # img_coord range from -1 to 1
     img_coord = (img_coord - 0.5) * 2
+    # corresponding coordinate from keyframe in current frame
     img_coord = img_coord.view(N, 2, H, W).permute(0, 2, 3, 1)
+    # N, H, W, 2
     return img_coord
 
 def upsample(x):
@@ -88,6 +97,7 @@ class GaussianAverage(nn.Module):
         kernel = self.window.to(x.device).to(x.dtype).repeat(x.shape[1], 1, 1, 1)
         return F.conv2d(x, kernel, padding=0, groups=x.shape[1])
 
+# https://github.com/nianticlabs/monodepth2/blob/master/layers.py
 class SSIM(nn.Module):
     """Layer to compute the SSIM loss between a pair of images
     """
@@ -95,6 +105,7 @@ class SSIM(nn.Module):
         super(SSIM, self).__init__()
         self.comp_mode = comp_mode
 
+        # gaussian_average=False
         if not gaussian_average:
             self.mu_x_pool   = nn.AvgPool2d(3, 1)
             self.mu_y_pool   = nn.AvgPool2d(3, 1)
@@ -108,6 +119,7 @@ class SSIM(nn.Module):
             self.sig_y_pool = GaussianAverage()
             self.sig_xy_pool = GaussianAverage()
 
+        # pad_reflection=True
         if pad_reflection:
             self.pad = nn.ReflectionPad2d(1)
         else:
@@ -117,6 +129,7 @@ class SSIM(nn.Module):
         self.C2 = 0.03 ** 2
 
     def forward(self, x, y):
+        # https://zhuanlan.zhihu.com/p/50757421
         x = self.pad(x)
         y = self.pad(y)
 
@@ -133,6 +146,7 @@ class SSIM(nn.Module):
         SSIM_n = (2 * mu_x_y + self.C1) * (2 * sigma_xy + self.C2)
         SSIM_d = (mu_x_sq + mu_y_sq + self.C1) * (sigma_x + sigma_y + self.C2)
 
+        # comp_mode=False
         if not self.comp_mode:
             return torch.clamp((1 - SSIM_n / SSIM_d) / 2, 0, 1)
         else:
@@ -144,6 +158,7 @@ def ssim(x, y, pad_reflection=True, gaussian_average=False, comp_mode=False):
     return ssim_(x, y)
 
 
+# not in use
 class ResidualImage(nn.Module):
     def __init__(self):
         super().__init__()
@@ -158,6 +173,7 @@ class ResidualImage(nn.Module):
         return data_dict["residual_image"]
 
 
+# not in use
 class ResidualImageModule(nn.Module):
     def __init__(self, use_mono=True, use_stereo=False):
         super().__init__()
@@ -286,6 +302,7 @@ class PadSameConv2dTransposed(torch.nn.Module):
         return x
 
 
+# TODO
 class ConvReLU2(torch.nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, leaky_relu_neg_slope=0.1):
         """
@@ -377,6 +394,7 @@ class ConvSig(torch.nn.Module):
         return self.sig(t)
 
 
+# TODO
 class Refine(torch.nn.Module):
     def __init__(self, in_channels, out_channels, leaky_relu_neg_slope=0.1):
         """

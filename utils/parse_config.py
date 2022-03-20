@@ -125,6 +125,7 @@ def _get_opt_name(flags):
             return flg.replace('--', '')
     return flags[0].replace('--', '')
 
+# usage -> _set_by_path(config, opt.target, value)
 def _set_by_path(tree, keys, value):
     """Set a value in a nested object in tree by sequence of keys."""
     _get_by_path(tree, keys[:-1])[keys[-1]] = value

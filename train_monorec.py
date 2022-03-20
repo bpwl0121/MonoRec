@@ -11,6 +11,7 @@ from trainer.monorec_trainer import MonoRecTrainer
 
 
 def main(config, options=()):
+    # set random seed
     seed_rng(0)
     logger = config.get_logger('train')
 

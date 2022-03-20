@@ -9,6 +9,7 @@ from utils import inf_loop, map_fn, operator_on_dict, LossWrapper, ValueFader
 
 import time
 
+# only depth uses this Trainer directly
 class Trainer(BaseTrainer):
     def __init__(self, model, loss, metrics, optimizer, config, data_loader,
                  valid_data_loader=None, lr_scheduler=None, options=[]):
@@ -40,11 +41,14 @@ class Trainer(BaseTrainer):
         self.invert_output_images = config["trainer"].get("invert_output_images", True)
         self.wrap_loss_in_module = config["trainer"].get("wrap_loss_in_module", False)
         self.value_faders = config["trainer"].get("value_faders", {})
+        # option only used for loss function
         self.options = options
 
+        # self.wrap_loss_in_module = False
         if self.wrap_loss_in_module:
             self.loss = LossWrapper(loss_function=self.loss, roi=self.roi, options=self.options)
 
+        # depth_loss is not torch.nn.Module
         if isinstance(loss, torch.nn.Module) or self.wrap_loss_in_module:
             self.module_loss = True
             self.loss.to(self.device)
@@ -83,6 +87,7 @@ class Trainer(BaseTrainer):
 
         for batch_idx, (data, target) in enumerate(self.data_loader):
             data.update(fade_values)
+            # target is keyframe_depth in dataloader for monorec_depth
             data, target = to(data, self.device), to(target, self.device)
             data["target"] = target
             # data["optimizer"] = self.optimizer
@@ -91,12 +96,14 @@ class Trainer(BaseTrainer):
 
             self.optimizer.zero_grad()
 
+            # self.module_loss = False
             if not self.module_loss:
                 data = self.model(data)
                 loss_dict = self.loss(data, self.alpha, self.roi_train, options=self.options)
             else:
                 data, loss_dict = self.model(data)
 
+            # apply torch.sum function to all the items in the loss_dict
             loss_dict = map_fn(loss_dict, torch.sum)
 
             loss = loss_dict["loss"]

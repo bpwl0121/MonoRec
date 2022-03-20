@@ -7,6 +7,7 @@ from model.layers import Backprojection, point_projection, ssim
 from utils import create_mask, mask_mean
 
 
+# https://github.com/nianticlabs/monodepth2/blob/b676244e5a1ca55564eb5d16ab521a48f823af31/trainer.py#L393
 def compute_errors(img0, img1, mask=None):
     errors = .85 * torch.mean(ssim(img0, img1, pad_reflection=False, gaussian_average=True, comp_mode=True), dim=1) + .15 * torch.mean(torch.abs(img0 - img1), dim=1)
     if mask is not None: return errors, mask
@@ -49,12 +50,15 @@ def reprojection_loss(depth_prediction: torch.Tensor, data_dict, automasking=Fal
     for i, (frame, extrinsic, intrinsic) in enumerate(zip(frames, extrinsics, intrinsics)):
         cam_points = backproject_depth(1 / depth_prediction, torch.inverse(keyframe_intrinsics))
         pix_coords = point_projection(cam_points, batch_size, height, width, intrinsic, extrinsic @ keyframe_pose)
+        # frame + 1.5 cause we use padding_mode="zeros", to make 0 only from padding_mode, we must make sure that the data does not contain 0
         reprojections.append(F.grid_sample(frame + 1.5, pix_coords, padding_mode="zeros"))
         if border > 0:
             warped_masks.append(F.grid_sample(masks[i], pix_coords, padding_mode="zeros"))
 
     reprojections = torch.stack(reprojections, dim=1).view(batch_size * frame_count, channels, height, width)
+    # mask for out-of-bound grid locations, padding_mode="zeros"
     mask = reprojections[:, 0, :, :] == 0
+    # - 1.0 to make  value in frame between 0 and 1(normalized) 
     reprojections -= 1.0
 
     if border > 0:
@@ -70,6 +74,7 @@ def reprojection_loss(depth_prediction: torch.Tensor, data_dict, automasking=Fal
         error_function_weight = [1 for i in range(len(error_function))]
 
     for ef, w in zip(error_function, error_function_weight):
+        # ef is compute_errors
         errors, n_mask = ef(reprojections, keyframe_expanded, mask)
         n_height, n_width = n_mask.shape[1:]
         errors = errors.view(batch_size, frame_count, n_height, n_width)
@@ -77,11 +82,13 @@ def reprojection_loss(depth_prediction: torch.Tensor, data_dict, automasking=Fal
         n_mask = n_mask.view(batch_size, frame_count, n_height, n_width)
         errors[n_mask] = float("inf")
 
+        # automasking = True
         if automasking:
             frames_stacked = torch.stack(frames, dim=1).view(batch_size * frame_count, channels, height, width) + .5
             errors_nowarp = ef(frames_stacked, keyframe_expanded).view(batch_size, frame_count, n_height, n_width)
             errors[errors_nowarp < errors] = float("inf")
 
+        # mono_auto=False
         if mono_auto:
             keyframe_expanded_ = (keyframe + .5).unsqueeze(1).expand(-1, len(data_dict["frames"]), -1, -1, -1).reshape(batch_size * len(data_dict["frames"]), channels, height, width)
             frames_stacked = (torch.stack(data_dict["frames"], dim=1) + .5).view(batch_size * len(data_dict["frames"]), channels, height, width)
@@ -90,6 +97,7 @@ def reprojection_loss(depth_prediction: torch.Tensor, data_dict, automasking=Fal
             errors_nowarp[torch.all(n_mask, dim=1, keepdim=True)] = float("inf")
             errors = torch.min(errors, errors_nowarp.expand(-1, frame_count, -1, -1))
 
+        # combine_frames = "min"
         if combine_frames == "min":
             errors = torch.min(errors, dim=1)[0]
             n_mask = torch.isinf(errors)
@@ -107,6 +115,7 @@ def reprojection_loss(depth_prediction: torch.Tensor, data_dict, automasking=Fal
         else:
             raise ValueError("Combine frames must be \"min\", \"avg\" or \"rnd\".")
 
+        # True for selfsup_loss
         if reduce:
             loss += w * mask_mean(errors, n_mask)
         else:

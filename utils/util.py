@@ -108,15 +108,17 @@ def get_mask(pred: torch.Tensor, gt: torch.Tensor, max_distance=None, pred_all_v
 
 def mask_mean(t: torch.Tensor, m: torch.Tensor, dim=None):
     t = t.clone()
+    # m: mask, if the gt is 0, mask is 1
     t[m] = 0
     els = 1
     if dim is None:
         dim = list(range(len(t.shape)))
     for d in dim:
         els *= t.shape[d]
+    # all depth error / sum of non empty depth position
     return torch.sum(t, dim=dim) / (els - torch.sum(m.to(torch.float), dim=dim))
 
-
+# flip the pixel in width dimension for "condition" frame
 def conditional_flip(x, condition, inplace=True):
     if inplace:
         x[condition, :, :, :] = x[condition, :, :, :].flip(3)
@@ -240,6 +242,9 @@ def operator_on_dict(dict_0: dict, dict_1: dict, operator, default=0):
 numbers = [f"{i:d}" for i in range(1, 10, 1)]
 
 
+# do not filter any state_dict in current released pipeline, 
+# only pretrained depth model, data_parallel=True, to filter out the prefix of the key
+# my guess: internal version has different module name
 def filter_state_dict(state_dict, data_parallel=False):
     if data_parallel:
         state_dict = {k[7:]: state_dict[k] for k in state_dict}
