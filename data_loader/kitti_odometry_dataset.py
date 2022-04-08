@@ -304,7 +304,8 @@ class KittiOdometryDataset(Dataset):
             "image_id": torch.tensor([int(index + self._offset)], dtype=torch.int32)
         }
 
-        # return_stereo always True
+        # return_stereo always True for training
+        # return_stereo False for evaluation
         if self.return_stereo:
             # only stereoframe for current keyframe
             stereoframe = self.preprocess_image(
@@ -319,6 +320,7 @@ class KittiOdometryDataset(Dataset):
         # monorec_mask, return_mvobj_mask=2
         # monorec_mask_ref, return_mvobj_mask=True
         # monorec_depth_ref, return_mvobj_mask=True
+        # eval_monorec, return_mvobj_mask=False
         if self.return_mvobj_mask > 0:
             mask = torch.tensor(np.load(sequence_folder / "mvobj_mask" / f"{index + self._offset:06d}.npy"), dtype=torch.float32).unsqueeze(0)
             data["mvobj_mask"] = mask

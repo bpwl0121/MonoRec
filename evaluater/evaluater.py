@@ -81,6 +81,7 @@ class Evaluater(BaseTrainer):
 
             with torch.no_grad():
                 data = self.model(data)
+                # loss_dict and loss not in use 
                 loss_dict = {"loss": torch.tensor([0])}
                 loss = loss_dict["loss"]
 

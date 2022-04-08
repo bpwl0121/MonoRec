@@ -353,6 +353,7 @@ def depth_refinement_loss(data_dict, alpha=None, roi=None, options=()):
         mono_sdl_sum += mono_sdl.detach()
 
         if use_mono_stereodl:
+            # use stereo_pred as GT, cause depth_gt is sparse
             mono_stereodl, mono_stereodl_mask = sparse_depth_loss(mono_pred, stereo_pred * cv_mask_discrete, l2=False, reduce=False)
             # TODO I think it is a bug for mono_stereodl.detach(), we should not .detach()
             stereo_sdl = mask_mean(mono_stereodl.detach(), mono_stereodl_mask)

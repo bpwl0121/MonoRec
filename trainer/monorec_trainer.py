@@ -92,6 +92,7 @@ class MonoRecTrainer(Trainer):
             # monorec_mask mult_mask_on_cv: False
             # monorec_mask_ref mult_mask_on_cv: False
             # monorec_depth_ref mult_mask_on_cv: True 
+            # for final model, we use warped cost_volume
             if self.mult_mask_on_cv:
                 data_dict["cost_volume"] *= (1 - data_dict["cv_mask"])
         else:

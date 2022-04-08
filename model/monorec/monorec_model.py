@@ -660,6 +660,7 @@ class MonoRecModel(nn.Module):
         # monorec_mask "pretrain_mode": 2
         # monorec_mask_ref "pretrain_mode": 0
         # monorec_depth_ref "pretrain_mode": 0
+        # evaluation "pretrain_mode": 0
         
         if not (self.pretrain_mode == 1 or self.pretrain_mode == 3):
             # simple_mask=False
@@ -721,7 +722,7 @@ class MonoRecModel(nn.Module):
         else:
             self.augmenter = None
 
-    ############################ only used by monorec_depth #################
+    ############################ only used by monorec_depth and evaluation #################
     def forward(self, data_dict):
         keyframe = data_dict["keyframe"]
 
@@ -750,11 +751,9 @@ class MonoRecModel(nn.Module):
         data_dict["image_features"] = self._feature_extractor(keyframe + .5)
 
         # monorec_depth "pretrain_mode": 1
-        # monorec_mask "pretrain_mode": 2
-        # monorec_mask_ref "pretrain_mode": 0
-        # monorec_depth_ref "pretrain_mode": 0
+        # evaluation "pretrain_mode": 0
 
-        # monorec_mask, monorec_mask_ref, monorec_depth_ref
+        # evaluation
         if self.pretrain_mode == 0 or self.pretrain_mode == 2:
             # att_module is MaskModule
             data_dict = self.att_module(data_dict)
@@ -779,9 +778,9 @@ class MonoRecModel(nn.Module):
         elif self.pretrain_mode == 3:
             data_dict["cv_mask"] = data_dict["mvobj_mask"].clone().detach()
 
-        # monorec_depth, monorec_mask_ref, monorec_depth_ref
+        # monorec_depth, evaluation 
         # for monorec_depth, data_dict["cv_mask"] always 0, since pretrain_dropout_mode=0 and pretrain_dropout=0 from the code above
-        # for monorec_mask_ref, monorec_depth_ref, data_dict["cv_mask"] from mask module
+        # for evaluation, data_dict["cv_mask"] from mask module
         if not self.pretrain_mode == 2:
             data_dict["cost_volume"] = (1 - data_dict["cv_mask"]) * data_dict["cost_volume"]
 
@@ -794,10 +793,10 @@ class MonoRecModel(nn.Module):
         if self.augmenter is not None and self.training:
             self.augmenter.revert(data_dict)
 
-        # monorec_mask
+        # not in use
         if self.pretrain_mode == 2:
             data_dict["result"] = data_dict["cv_mask"]
-        # monorec_depth, monorec_mask_ref, monorec_depth_ref
+        # monorec_depth, evaluation
         else:
             data_dict["result"] = data_dict["predicted_inverse_depths"][0]
             data_dict["mask"] = data_dict["cv_mask"]
